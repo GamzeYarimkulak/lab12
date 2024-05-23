@@ -1,0 +1,194 @@
+url-shortener/
+|-- app/
+|   |-- controllers/
+|   |   |-- HomeController.php
+|   |-- models/
+|   |   |-- UrlModel.php
+|   |-- views/
+|   |   |-- home.php
+|-- public/
+|   |-- index.php
+|-- config/
+|   |-- database.php
+|-- core/
+|   |-- App.php
+|   |-- Controller.php
+|   |-- Model.php
+|-- .htaccess
+|-- composer.json
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ index.php?url=$1 [QSA,L]
+<?php
+
+require_once '../core/App.php';
+require_once '../core/Controller.php';
+require_once '../core/Model.php';
+require_once '../config/database.php';
+
+$app = new App();
+<?php
+
+class App {
+    protected $controller = 'HomeController';
+    protected $method = 'index';
+    protected $params = [];
+
+    public function __construct() {
+        $url = $this->parseUrl();
+
+        if(file_exists('../app/controllers/' . $url[0] . 'Controller.php')) {
+            $this->controller = $url[0] . 'Controller';
+            unset($url[0]);
+        }
+
+        require_once '../app/controllers/' . $this->controller . '.php';
+        $this->controller = new $this->controller;
+
+        if(isset($url[1])) {
+            if(method_exists($this->controller, $url[1])) {
+                $this->method = $url[1];
+                unset($url[1]);
+            }
+        }
+
+        $this->params = $url ? array_values($url) : [];
+
+        call_user_func_array([$this->controller, $this->method], $this->params);
+    }
+
+    public function parseUrl() {
+        if(isset($_GET['url'])) {
+            return explode('/', filter_var(rtrim($_GET['url'], '/'), FILTER_SANITIZE_URL));
+        }
+    }
+}
+<?php
+
+class Controller {
+    public function model($model) {
+        require_once '../app/models/' . $model . '.php';
+        return new $model();
+    }
+
+    public function view($view, $data = []) {
+        require_once '../app/views/' . $view . '.php';
+    }
+}
+<?php
+
+class Model {
+    protected $db;
+
+    public function __construct() {
+        $this->db = new PDO(DB_DSN, DB_USER, DB_PASS);
+    }
+}
+<?php
+
+define('DB_DSN', 'sqlite:' . __DIR__ . '/../database/database.db');
+define('DB_USER', null);
+define('DB_PASS', null);
+<?php
+
+class HomeController extends Controller {
+    public function index() {
+        $this->view('home');
+    }
+
+    public function shorten() {
+        if (isset($_POST['url'])) {
+            $url = filter_var($_POST['url'], FILTER_VALIDATE_URL);
+            if (!$url) {
+                echo json_encode(['error' => 'Geçersiz URL']);
+                return;
+            }
+
+            $urlModel = $this->model('UrlModel');
+            $shortCode = $urlModel->getShortCode($url);
+
+            if (!$shortCode) {
+                $shortCode = $urlModel->createShortCode($url);
+            }
+
+            echo json_encode(['shortCode' => $shortCode]);
+        }
+    }
+
+    public function redirect($shortCode) {
+        $urlModel = $this->model('UrlModel');
+        $url = $urlModel->getUrl($shortCode);
+
+        if ($url) {
+            header('Location: ' . $url);
+            exit();
+        } else {
+            echo 'URL bulunamadı';
+        }
+    }
+}
+<?php
+
+class UrlModel extends Model {
+    public function getShortCode($url) {
+        $stmt = $this->db->prepare("SELECT short_code FROM urls WHERE url = :url");
+        $stmt->execute(['url' => $url]);
+        return $stmt->fetchColumn();
+    }
+
+    public function createShortCode($url) {
+        $shortCode = $this->generateShortCode();
+        $stmt = $this->db->prepare("INSERT INTO urls (url, short_code) VALUES (:url, :short_code)");
+        $stmt->execute(['url' => $url, 'short_code' => $shortCode]);
+        return $shortCode;
+    }
+
+    public function getUrl($shortCode) {
+        $stmt = $this->db->prepare("SELECT url FROM urls WHERE short_code = :short_code");
+        $stmt->execute(['short_code' => $shortCode]);
+        return $stmt->fetchColumn();
+    }
+
+    private function generateShortCode() {
+        return bin2hex(random_bytes(6));
+    }
+}
+<!DOCTYPE html>
+<html>
+<head>
+    <title>URL Kısaltma</title>
+</head>
+<body>
+    <div style="text-align:center; margin-top:50px;">
+        <h1>URL Kısaltma</h1>
+        <input type="text" id="url" placeholder="URL'yi yapıştırın" style="width:300px;">
+        <button onclick="shortenUrl()">Kısalt</button>
+        <div id="result" style="margin-top:20px;"></div>
+    </div>
+
+    <script>
+        function shortenUrl() {
+            var url = document.getElementById('url').value;
+            fetch('/home/shorten', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: 'url=' + encodeURIComponent(url)
+            }).then(response => response.json()).then(data => {
+                if (data.error) {
+                    document.getElementById('result').innerText = data.error;
+                } else {
+                    document.getElementById('result').innerHTML = 'Kısa URL: <a href="/' + data.shortCode + '">' + data.shortCode + '</a>';
+                }
+            });
+        }
+    </script>
+</body>
+</html>
+CREATE TABLE urls (
+    id INTEGER PRIMARY KEY,
+    url TEXT NOT NULL,
+    short_code TEXT NOT NULL UNIQUE
+);
